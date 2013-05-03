@@ -1,0 +1,21 @@
+# Go memcached-based caching proxy
+
+## Usage
+
+    ./caching_proxy --listen=localhost:80 --backends=localhost:5000,localhost:5001 --redis=localhost:6000 --api=localhost:7000
+    
+## API
+
+    GET http://localhost:7000
+   
+    {
+      listen: "localhost:80",
+      backends: ["localhost:5000", "localhost:5001"],
+      redis: "localhost:6000", "localhost:6001"
+    }
+
+    POST http://localhost:7000/purges
+    
+    {
+      patterns: ["*/pages/form", "bootic.net*"]
+    }
