@@ -1,4 +1,8 @@
-# Go memcached-based caching proxy
+# Go Redis-based caching proxy
+
+## What
+
+Listen to HTTP requests, proxy them to one or more backends, cache responses in Redis.
 
 ## Usage
 
