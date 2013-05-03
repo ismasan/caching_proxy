@@ -125,7 +125,8 @@ func (p *Proxy) director(req *http.Request, target *url.URL) {
 
 func (p *Proxy) cacheKey(req *http.Request) string {
   key := req.URL.String()
-  s := []string{"caching", key}
+  
+  s := []string{"caching", req.Host, key}
   return strings.Join(s, ":")
 }
 
@@ -198,13 +199,6 @@ func (p *Proxy) serveFromCache(data string, rw http.ResponseWriter) {
 func (p *Proxy) cache(key string, cached_response *CachedResponse) {
   // encode
   encoded, _ := serializeResponse(cached_response)
-  // decode
-  // decoded, _ := deserializeResponse(encoded)
-  //   log.Println("GOB DECODE", decoded.Body)
-  
-  // Cache    
-  // bodyValue := string(cached_response.Body)
-  // log.Println("BODY string", bodyValue)
   p.Redis.Set(key, string(encoded))
 }
 
