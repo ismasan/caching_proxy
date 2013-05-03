@@ -14,6 +14,14 @@
       redis: "localhost:6000", "localhost:6001"
     }
 
+    GET http://localhost:7000/keys?q=www.google.com*
+    
+    [
+      "www.google.com/",
+      "www.google.com/foo",
+      "www.google.com/foo/bar"
+    ]
+
     POST http://localhost:7000/purges
     
     {
