@@ -90,7 +90,6 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
   cacheKey := p.cacheKey(req)
   
   hit := p.Redis.Get(cacheKey)
-  
   if hit.Err() == nil { // cache hit. Serve it.
     log.Println("CACHE HIT", cacheKey)
     p.serveFromCache(hit.Val(), rw)
