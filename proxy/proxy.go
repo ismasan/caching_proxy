@@ -8,20 +8,55 @@ import (
     "net/url"
     "net/http"
     "strings"
+    "io"
     "io/ioutil"
-    "github.com/vmihailenco/redis"
+    "github.com/bradfitz/gomemcache/memcache"
 )
+
+type Store interface {
+
+  Get(key string) ([]byte, error)
+  Set(key string, data []byte) (error)
+
+}
+
+type MemcacheStore struct {
+  client *memcache.Client
+}
+
+// If item found, always return nil error
+func (s *MemcacheStore) Get(key string) (data []byte, err error) {
+  item, err := s.client.Get(key)
+  if item == nil {
+    return
+  }
+  err = nil
+  data = item.Value
+  return
+}
+
+func (s *MemcacheStore) Set(key string, data []byte) (error) {
+  s.client.Set(&memcache.Item{Key: key, Value: data})
+  return nil
+}
+
+func NewMemcacheStore (hosts string) (store *MemcacheStore) {
+  split_mchosts := strings.Split(hosts, ",")
+  mc := memcache.New(split_mchosts...)
+  store = &MemcacheStore{client: mc}
+  return
+}
 
 type Proxy struct {
   backends []*url.URL
-  Redis *redis.Client
+  Store Store
   // The transport used to perform proxy requests.
   // If nil, http.DefaultTransport is used.
   // http.RoundTripper is an interface
   Transport http.RoundTripper
 }
 
-func NewProxy(backend_hosts, redis_host string) (proxy *Proxy, err error) {
+func NewProxy(backend_hosts, store_hosts string) (proxy *Proxy, err error) {
   split_backends := strings.Split(backend_hosts, ",")
   var backend_urls []*url.URL
   for _, host := range split_backends {
@@ -31,13 +66,10 @@ func NewProxy(backend_hosts, redis_host string) (proxy *Proxy, err error) {
     }
     backend_urls = append(backend_urls, url)
   }
-  
-  password := "" // no password set
-  redis := redis.NewTCPClient(redis_host, password, -1)
-  
-  defer redis.Close()
-  
-  proxy = &Proxy{backends: backend_urls, Redis: redis}
+
+  store := NewMemcacheStore(store_hosts)
+
+  proxy = &Proxy{backends: backend_urls, Store: store}
   return
 }
 
@@ -49,9 +81,9 @@ type CachedResponse struct {
 }
 
 func serializeResponse(res *CachedResponse) (raw []byte, err error) {
-  
+
   raw, err = json.Marshal(res)
-  
+
   return
 }
 
@@ -67,13 +99,7 @@ func NewCachedResponse(res *http.Response) (response *CachedResponse) {
   if err != nil {
      log.Fatal("Error reading from Body", err)
   }
-  
-  // var headers map[string][]string
-  //   
-  //   for k, vv := range res.Header {
-  //     headers[k] = vv
-  //   }
-  
+
   response = &CachedResponse{
     Body: body, 
     Headers: res.Header, 
@@ -85,28 +111,34 @@ func NewCachedResponse(res *http.Response) (response *CachedResponse) {
 }
 
 func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
-  /* Is it cached?
+  
+  /* Is it cacheable?
   ------------------------------------*/
-  cacheKey := p.cacheKey(req)
-  
-  hit := p.Redis.Get(cacheKey)
-  if hit.Err() == nil { // cache hit. Serve it.
-    log.Println("CACHE HIT", cacheKey)
-    p.serveFromCache(hit.Val(), rw)
-  } else { // Cache miss. Proxy and cache.
-    log.Println("CACHE MISS", cacheKey)
-    p.proxyAndCache(cacheKey, rw, req)
+  if req.Method == "GET" || req.Method == "HEAD" || req.Method == "OPTIONS" { // can be cache
+    /* Is it cached?
+    ------------------------------------*/
+    cacheKey := p.cacheKey(req)
+
+    data, err := p.Store.Get(cacheKey)
+    if err == nil { // cache hit. Serve it.
+      log.Println("CACHE HIT", cacheKey)
+      p.serveFromCache(data, rw)
+    } else { // Cache miss. Proxy and cache.
+      log.Println("CACHE MISS", cacheKey, err, data)
+      p.proxyAndCache(cacheKey, rw, req)
+    }
+
+  } else { // just proxy to backends
+    log.Println("NON CACHEABLE")
+    backendResp, err := p.proxy(rw, req)
+    if err != nil {
+      log.Printf("http: proxy error: %v", err)
+      rw.WriteHeader(http.StatusInternalServerError)
+      return
+    }
+    copyHeaderForFrontend(rw.Header(), backendResp.Header)
+    io.Copy(rw, backendResp.Body)
   }
-  
-  /* Copy body
-  -----------------------------------*/
-  // Buffered version
-  // rw.Write(cached_response.Body)
-  // Stream version
-  // if res.Body != nil {
-  //     var dst io.Writer = rw
-  //     io.Copy(dst, res.Body)
-  //   }
 }
 
 func (p *Proxy) director(req *http.Request, backend *url.URL) {
@@ -125,11 +157,11 @@ func (p *Proxy) director(req *http.Request, backend *url.URL) {
 func (p *Proxy) cacheKey(req *http.Request) string {
   key := req.URL.String()
   
-  s := []string{"caching", req.Host, key}
+  s := []string{"caching", req.Method, req.Host, key}
   return strings.Join(s, ":")
 }
 
-func (p *Proxy) proxyAndCache(cacheKey string, rw http.ResponseWriter, req *http.Request) {
+func (p *Proxy) proxy(rw http.ResponseWriter, req *http.Request) (*http.Response, error) {
   backend := p.backends[0] // do round-robin here later
 
   /* Add forward
@@ -143,6 +175,7 @@ func (p *Proxy) proxyAndCache(cacheKey string, rw http.ResponseWriter, req *http
   *outreq = *req // includes shallow copies of maps, but okay
 
   p.director(outreq, backend)
+  outreq.Method = req.Method
   outreq.Proto = "HTTP/1.1"
   outreq.ProtoMajor = 1
   outreq.ProtoMinor = 1
@@ -156,7 +189,7 @@ func (p *Proxy) proxyAndCache(cacheKey string, rw http.ResponseWriter, req *http
   // (shallow copied above) so we only copy it if necessary.
   if outreq.Header.Get("Connection") != "" {
     outreq.Header = make(http.Header)
-    copyHeader(outreq.Header, req.Header)
+    copyHeaderForBackend(outreq.Header, req.Header)
     outreq.Header.Del("Connection")
   }
 
@@ -164,53 +197,75 @@ func (p *Proxy) proxyAndCache(cacheKey string, rw http.ResponseWriter, req *http
     outreq.Header.Set("X-Forwarded-For", clientIp)
   }
 
-  res, err := transport.RoundTrip(outreq)
+  return transport.RoundTrip(outreq)
+}
+
+func (p *Proxy) proxyAndCache(cacheKey string, rw http.ResponseWriter, req *http.Request) {
+
+  backendResp, err := p.proxy(rw, req)
+
   if err != nil {
     log.Printf("http: proxy error: %v", err)
     rw.WriteHeader(http.StatusInternalServerError)
     return
   }
 
-  log.Println("http: response code: ", res.StatusCode)
+  log.Println("http: response code: ", backendResp.StatusCode)
   /* Cache in Redis
   ------------------------------------*/
-  cached_response := NewCachedResponse(res)
+  cached_response := NewCachedResponse(backendResp)
   /* Copy headers
   ------------------------------------*/
-  copyHeader(rw.Header(), res.Header)
-  /* Copy status code
-  ------------------------------------*/
-  rw.WriteHeader(res.StatusCode)
+  copyHeaderForFrontend(rw.Header(), backendResp.Header)
   
   /* Only cache successful response
   ------------------------------------*/
-  if res.StatusCode >= 200 && res.StatusCode < 300 {
-    go p.cache(cacheKey, cached_response)
-  } else if res.StatusCode == 304 { // no changes and client understands HTTP caching.
-    log.Println("Not Modified 304")
-    go p.cache(cacheKey, cached_response)
-    rw.Write([]byte{})
-  } else {
-    rw.Write(cached_response.Body)
+  var body []byte
+  body = cached_response.Body
+
+  if backendResp.StatusCode >= 200 && backendResp.StatusCode < 300 {
+    log.Println("SUCCESS")
+    if req.Method == "HEAD" || req.Method == "OPTIONS" {
+      log.Println("NO BODY", req.Method)
+      rw.Write([]byte{})
+      req.Body.Close()
+    } else if req.Header.Get("If-Modified-Since") != "" && req.Header.Get("If-None-Match") != "" {
+      // if client is sending if-modified or if-non-match
+      // we assume that they already have a copy of the body
+      log.Println("Client has copy. Send 304")
+      rw.WriteHeader(http.StatusNotModified)
+      body = []byte{}
+    } else {
+      /* Copy status code
+      ------------------------------------*/
+      rw.WriteHeader(backendResp.StatusCode)
+    }
+
+    rw.Write(body)
+    p.cache(cacheKey, cached_response)
+  } else { // error. Copy body.
+    log.Println("Error Status", backendResp.StatusCode)
+    rw.WriteHeader(backendResp.StatusCode)
+    io.Copy(rw, backendResp.Body)
   }
+
 }
 
-func (p *Proxy) serveFromCache(data string, rw http.ResponseWriter) {
-  cached_response, _ := deserializeResponse([]byte(data))
-  
+func (p *Proxy) serveFromCache(data []byte, rw http.ResponseWriter) {
+  cached_response, _ := deserializeResponse(data)
   /* Copy headers
   ------------------------------------*/
-  copyHeader(rw.Header(), cached_response.Headers)
-  
+  copyHeaderForFrontend(rw.Header(), cached_response.Headers)
+
   rw.Header().Add("X-Cache", "GoProxy")
-  // rw.WriteHeader(cached_response.StatusCode)
   rw.Write(cached_response.Body)
 }
 
 func (p *Proxy) cache(key string, cached_response *CachedResponse) {
   // encode
+  log.Println("CACHE NOW", cached_response.Headers)
   encoded, _ := serializeResponse(cached_response)
-  p.Redis.Set(key, string(encoded))
+  p.Store.Set(key, encoded)
 }
 
 /* Utils
@@ -228,10 +283,21 @@ func singleJoiningSlash(a, b string) string {
   return a + b
 }
 
-func copyHeader(dst, src http.Header) {
+func copyHeaderForFrontend(dst, src http.Header) {
   for k, vv := range src {
     for _, v := range vv {
       dst.Add(k, v)
+    }
+  }
+}
+// We don not want the backend to respond with 304
+// Because then we don't have a response body to cache!
+func copyHeaderForBackend(dst, src http.Header) {
+  for k, vv := range src {
+    for _, v := range vv {
+      if k != "If-Modified-Since" && k != "If-None-Match" {
+        dst.Add(k, v)
+      }
     }
   }
 }
