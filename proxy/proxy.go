@@ -109,12 +109,12 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
   //   }
 }
 
-func (p *Proxy) director(req *http.Request, target *url.URL) {
-  targetQuery := target.RawQuery
+func (p *Proxy) director(req *http.Request, backend *url.URL) {
+  targetQuery := backend.RawQuery
   
-  req.URL.Scheme = target.Scheme
-  req.URL.Host = target.Host
-  req.URL.Path = singleJoiningSlash(target.Path, req.URL.Path)
+  req.URL.Scheme = backend.Scheme
+  req.URL.Host = backend.Host
+  req.URL.Path = singleJoiningSlash(backend.Path, req.URL.Path)
   if targetQuery == "" || req.URL.RawQuery == "" {
     req.URL.RawQuery = targetQuery + req.URL.RawQuery
   } else {
@@ -130,7 +130,7 @@ func (p *Proxy) cacheKey(req *http.Request) string {
 }
 
 func (p *Proxy) proxyAndCache(cacheKey string, rw http.ResponseWriter, req *http.Request) {
-  target := p.backends[0] // do round-robin here later
+  backend := p.backends[0] // do round-robin here later
 
   /* Add forward
   -----------------------------*/
@@ -142,7 +142,7 @@ func (p *Proxy) proxyAndCache(cacheKey string, rw http.ResponseWriter, req *http
   outreq := new(http.Request)
   *outreq = *req // includes shallow copies of maps, but okay
 
-  p.director(outreq, target)
+  p.director(outreq, backend)
   outreq.Proto = "HTTP/1.1"
   outreq.ProtoMajor = 1
   outreq.ProtoMinor = 1
@@ -170,18 +170,29 @@ func (p *Proxy) proxyAndCache(cacheKey string, rw http.ResponseWriter, req *http
     rw.WriteHeader(http.StatusInternalServerError)
     return
   }
-  
+
+  log.Println("http: response code: ", res.StatusCode)
   /* Cache in Redis
   ------------------------------------*/
   cached_response := NewCachedResponse(res)
   /* Copy headers
   ------------------------------------*/
   copyHeader(rw.Header(), res.Header)
-  
+  /* Copy status code
+  ------------------------------------*/
   rw.WriteHeader(res.StatusCode)
-  rw.Write(cached_response.Body)
   
-  go p.cache(cacheKey, cached_response)
+  /* Only cache successful response
+  ------------------------------------*/
+  if res.StatusCode >= 200 && res.StatusCode < 300 {
+    go p.cache(cacheKey, cached_response)
+  } else if res.StatusCode == 304 { // no changes and client understands HTTP caching.
+    log.Println("Not Modified 304")
+    go p.cache(cacheKey, cached_response)
+    rw.Write([]byte{})
+  } else {
+    rw.Write(cached_response.Body)
+  }
 }
 
 func (p *Proxy) serveFromCache(data string, rw http.ResponseWriter) {
@@ -191,6 +202,7 @@ func (p *Proxy) serveFromCache(data string, rw http.ResponseWriter) {
   ------------------------------------*/
   copyHeader(rw.Header(), cached_response.Headers)
   
+  rw.Header().Add("X-Cache", "GoProxy")
   // rw.WriteHeader(cached_response.StatusCode)
   rw.Write(cached_response.Body)
 }
