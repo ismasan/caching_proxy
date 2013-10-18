@@ -16,9 +16,21 @@ type CacheController interface {
 
 type Stats struct {
   UpSince time.Time `json:"up_since"`
-  Hits int `json:"hits"`
-  Misses int `json:"misses"`
-  Purges int `json:"purges"`
+  Totals map[string]int `json:"totals"`
+  Hosts map[string]map[string]int `json:"hosts"`
+}
+
+func (s *Stats) Op(opName string) {
+  s.Totals[opName]++
+}
+
+func (s *Stats) HostOp(hostName, opName string) {
+  mm, ok := s.Hosts[hostName]
+  if !ok {
+      mm = make(map[string]int)
+      s.Hosts[hostName] = mm
+  }
+  s.Hosts[hostName][opName]++
 }
 
 type Api struct {
@@ -29,7 +41,11 @@ type Api struct {
 
 func NewApi(controller CacheController) (api *Api, err error) {
   api = &Api{
-    Stats: &Stats{UpSince: time.Now()},
+    Stats: &Stats{
+      UpSince: time.Now(),
+      Totals: make(map[string]int),
+      Hosts: make(map[string]map[string]int),
+    },
     CacheController: controller,
   }
   router := mux.NewRouter()
@@ -53,14 +69,9 @@ func (a *Api) SubscribeTo(ch events.ProxyEvents) {
     for {
       event := <- ch
       name  := event.Name
-      // host  := event.Host
-      if name == "hit" {
-        a.Stats.Hits = a.Stats.Hits + 1
-      } else if name == "miss" {
-        a.Stats.Misses = a.Stats.Misses + 1
-      } else if name == "purge" {
-        a.Stats.Purges = a.Stats.Purges + 1
-      }
+      host  := event.Host
+      a.Stats.Op(name)
+      a.Stats.HostOp(host, name)
     }
   }(ch)
 }
