@@ -10,42 +10,7 @@ import (
     "strings"
     "io"
     "io/ioutil"
-    "github.com/bradfitz/gomemcache/memcache"
 )
-
-type Store interface {
-
-  Get(key string) ([]byte, error)
-  Set(key string, data []byte) (error)
-
-}
-
-type MemcacheStore struct {
-  client *memcache.Client
-}
-
-// If item found, always return nil error
-func (s *MemcacheStore) Get(key string) (data []byte, err error) {
-  item, err := s.client.Get(key)
-  if item == nil {
-    return
-  }
-  err = nil
-  data = item.Value
-  return
-}
-
-func (s *MemcacheStore) Set(key string, data []byte) (error) {
-  s.client.Set(&memcache.Item{Key: key, Value: data})
-  return nil
-}
-
-func NewMemcacheStore (hosts string) (store *MemcacheStore) {
-  split_mchosts := strings.Split(hosts, ",")
-  mc := memcache.New(split_mchosts...)
-  store = &MemcacheStore{client: mc}
-  return
-}
 
 type Proxy struct {
   backends []*url.URL
@@ -120,22 +85,28 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
     cacheKey := p.cacheKey(req)
 
     data, err := p.Store.Get(cacheKey)
+
+    rw.Header().Add("Via", "GoProxy")
+
     if err == nil { // cache hit. Serve it.
-      log.Println("CACHE HIT", cacheKey)
-      p.serveFromCache(data, rw)
+      // log.Println("CACHE HIT", cacheKey)
+      p.serveFromCache(data, rw, req)
     } else { // Cache miss. Proxy and cache.
-      log.Println("CACHE MISS", cacheKey, err, data)
+      // log.Println("CACHE MISS", cacheKey, err, data)
       p.proxyAndCache(cacheKey, rw, req)
     }
 
   } else { // just proxy to backends
-    log.Println("NON CACHEABLE")
+    // log.Println("NON CACHEABLE")
     backendResp, err := p.proxy(rw, req)
+    
     if err != nil {
-      log.Printf("http: proxy error: %v", err)
+      // log.Printf("http: proxy error: %v", err)
       rw.WriteHeader(http.StatusInternalServerError)
       return
     }
+    // Must be same status as backend resp.
+    rw.WriteHeader(backendResp.StatusCode)
     copyHeaderForFrontend(rw.Header(), backendResp.Header)
     io.Copy(rw, backendResp.Body)
   }
@@ -181,7 +152,7 @@ func (p *Proxy) proxy(rw http.ResponseWriter, req *http.Request) (*http.Response
   outreq.ProtoMinor = 1
   outreq.Close = false
 
-  log.Println("Proxy", outreq.URL.Host, outreq.URL.Path, outreq.URL.RawQuery)
+  // log.Println("Proxy", outreq.URL.Host, outreq.URL.Path, outreq.URL.RawQuery)
 
   // Remove the connection header to the backend.  We want a
   // persistent connection, regardless of what the client sent
@@ -197,7 +168,10 @@ func (p *Proxy) proxy(rw http.ResponseWriter, req *http.Request) (*http.Response
     outreq.Header.Set("X-Forwarded-For", clientIp)
   }
 
-  return transport.RoundTrip(outreq)
+  backendResp, err := transport.RoundTrip(outreq)
+  // defer backendResp.Body.Close()
+  
+  return backendResp, err
 }
 
 func (p *Proxy) proxyAndCache(cacheKey string, rw http.ResponseWriter, req *http.Request) {
@@ -205,12 +179,12 @@ func (p *Proxy) proxyAndCache(cacheKey string, rw http.ResponseWriter, req *http
   backendResp, err := p.proxy(rw, req)
 
   if err != nil {
-    log.Printf("http: proxy error: %v", err)
+    // log.Printf("http: proxy error: %v", err)
     rw.WriteHeader(http.StatusInternalServerError)
     return
   }
 
-  log.Println("http: response code: ", backendResp.StatusCode)
+  // log.Println("http: response code: ", backendResp.StatusCode)
   /* Cache in Redis
   ------------------------------------*/
   cached_response := NewCachedResponse(backendResp)
@@ -224,15 +198,15 @@ func (p *Proxy) proxyAndCache(cacheKey string, rw http.ResponseWriter, req *http
   body = cached_response.Body
 
   if backendResp.StatusCode >= 200 && backendResp.StatusCode < 300 {
-    log.Println("SUCCESS")
+    // log.Println("SUCCESS")
     if req.Method == "HEAD" || req.Method == "OPTIONS" {
-      log.Println("NO BODY", req.Method)
+      // log.Println("NO BODY", req.Method)
       rw.Write([]byte{})
       req.Body.Close()
     } else if req.Header.Get("If-Modified-Since") != "" && req.Header.Get("If-None-Match") != "" {
       // if client is sending if-modified or if-non-match
       // we assume that they already have a copy of the body
-      log.Println("Client has copy. Send 304")
+      // log.Println("Client has copy. Send 304")
       rw.WriteHeader(http.StatusNotModified)
       body = []byte{}
     } else {
@@ -242,28 +216,32 @@ func (p *Proxy) proxyAndCache(cacheKey string, rw http.ResponseWriter, req *http
     }
 
     rw.Write(body)
-    p.cache(cacheKey, cached_response)
+    go p.cache(cacheKey, cached_response)
   } else { // error. Copy body.
-    log.Println("Error Status", backendResp.StatusCode)
+    // log.Println("Error Status", backendResp.StatusCode)
     rw.WriteHeader(backendResp.StatusCode)
     io.Copy(rw, backendResp.Body)
   }
 
 }
 
-func (p *Proxy) serveFromCache(data []byte, rw http.ResponseWriter) {
+func (p *Proxy) serveFromCache(data []byte, rw http.ResponseWriter, req *http.Request) {
   cached_response, _ := deserializeResponse(data)
   /* Copy headers
   ------------------------------------*/
   copyHeaderForFrontend(rw.Header(), cached_response.Headers)
 
-  rw.Header().Add("X-Cache", "GoProxy")
-  rw.Write(cached_response.Body)
+  if req.Method == "HEAD" || req.Method == "OPTIONS" {
+    rw.Header().Set("Connection", "close")
+    rw.Write([]byte{})
+  } else {
+    rw.Write(cached_response.Body)
+  }
 }
 
 func (p *Proxy) cache(key string, cached_response *CachedResponse) {
   // encode
-  log.Println("CACHE NOW", cached_response.Headers)
+  // log.Println("CACHE NOW", cached_response.Headers)
   encoded, _ := serializeResponse(cached_response)
   p.Store.Set(key, encoded)
 }
