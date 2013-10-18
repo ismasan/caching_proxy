@@ -15,29 +15,12 @@ Listen to HTTP requests, proxy them to one or more backends, cache responses in 
     GET http://localhost:7000
    
     {
-      up_since: '2013-05-03 18:09:17 +0100',
-      hits: 123456,
-      misses: 2000,
-      errors: 100,
-      listen: "localhost:80",
-      backends: ["localhost:5000", "localhost:5001"],
-      redis: "localhost:6000", "localhost:6001"
+      up_since: "2013-10-18T16:18:42.725401062+01:00",
+      hits: 27,
+      misses: 18,
+      purges: 2
     }
 
-### Cached URLs
+### Purge full hostnames
 
-    GET http://localhost:7000/keys?q=www.google.com*
-    
-    [
-      "www.google.com/",
-      "www.google.com/foo",
-      "www.google.com/foo/bar"
-    ]
-
-### Purge full or partial URLs
-
-    POST http://localhost:7000/purges
-    
-    {
-      patterns: ["*/pages/form", "bootic.net*"]
-    }
+    PUT http://localhost:7000/hosts/www.foobar.com

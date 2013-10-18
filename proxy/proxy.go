@@ -9,17 +9,26 @@ import (
     "net/http"
     "strings"
     "io"
-    "io/ioutil"
+    "caching_proxy/structs"
     "caching_proxy/store"
+    "caching_proxy/events"
+    "strconv"
+    "time"
+    "sync"
 )
+
+var mutex sync.Mutex
 
 type Proxy struct {
   backends []*url.URL
   Store store.Store
+  Events events.ProxyEvents
   // The transport used to perform proxy requests.
   // If nil, http.DefaultTransport is used.
   // http.RoundTripper is an interface
   Transport http.RoundTripper
+  // Per-host cache key prefixes
+  Prefixes map[string]int
 }
 
 func NewProxy(backend_hosts, store_hosts string) (proxy *Proxy, err error) {
@@ -35,43 +44,25 @@ func NewProxy(backend_hosts, store_hosts string) (proxy *Proxy, err error) {
 
   store := store.NewMemcacheStore(store_hosts)
 
-  proxy = &Proxy{backends: backend_urls, Store: store}
+  proxy = &Proxy{
+    backends: backend_urls, 
+    Store: store,
+    Events: make(events.ProxyEvents, 1),
+    Prefixes: make(map[string]int),
+  }
   return
 }
 
-type CachedResponse struct {
-  Status string
-  ContentLength int64
-  Headers http.Header
-  Body []byte
-}
-
-func serializeResponse(res *CachedResponse) (raw []byte, err error) {
+func serializeResponse(res *structs.CachedResponse) (raw []byte, err error) {
 
   raw, err = json.Marshal(res)
 
   return
 }
 
-func deserializeResponse(raw []byte) (res *CachedResponse, err error) {
+func deserializeResponse(raw []byte) (res *structs.CachedResponse, err error) {
   
   err = json.Unmarshal(raw, &res)
-  
-  return
-}
-
-func NewCachedResponse(res *http.Response) (response *CachedResponse) {
-  body, err := ioutil.ReadAll(res.Body)
-  if err != nil {
-     log.Fatal("Error reading from Body", err)
-  }
-
-  response = &CachedResponse{
-    Body: body, 
-    Headers: res.Header, 
-    Status: res.Status,
-    ContentLength: res.ContentLength,
-  }
   
   return
 }
@@ -90,17 +81,17 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
     rw.Header().Add("Via", "GoProxy")
 
     if err == nil { // cache hit. Serve it.
-      // log.Println("CACHE HIT", cacheKey)
+      p.Events.Create("hit", req.Host)
       p.serveFromCache(data, rw, req)
     } else { // Cache miss. Proxy and cache.
-      // log.Println("CACHE MISS", cacheKey, err, data)
+      p.Events.Create("miss", req.Host)
       p.proxyAndCache(cacheKey, rw, req)
     }
 
   } else { // just proxy to backends
-    // log.Println("NON CACHEABLE")
+    p.Events.Create("pass", req.Host)
     backendResp, err := p.proxy(rw, req)
-    
+
     if err != nil {
       // log.Printf("http: proxy error: %v", err)
       rw.WriteHeader(http.StatusInternalServerError)
@@ -115,7 +106,7 @@ func (p *Proxy) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 
 func (p *Proxy) director(req *http.Request, backend *url.URL) {
   targetQuery := backend.RawQuery
-  
+
   req.URL.Scheme = backend.Scheme
   req.URL.Host = backend.Host
   req.URL.Path = singleJoiningSlash(backend.Path, req.URL.Path)
@@ -126,11 +117,35 @@ func (p *Proxy) director(req *http.Request, backend *url.URL) {
   }
 }
 
+// This needs a mutex or channel/goroutine
+func (p *Proxy) initializePrefix(hostName string, fn func(int)) (prefix int) {
+  mutex.Lock()
+  prefix = p.Prefixes[hostName]
+  if prefix == 0 {// start prefix as unix timestamp
+    ts := time.Now().Unix()
+    prefix = int(ts)
+    p.Prefixes[hostName] = prefix
+  }
+  fn(prefix)
+  mutex.Unlock()
+  return
+}
+
 func (p *Proxy) cacheKey(req *http.Request) string {
   key := req.URL.String()
-  
-  s := []string{"caching", req.Method, req.Host, key}
+  prefix := p.initializePrefix(req.Host, func(int){})
+  stprefix := strconv.Itoa(prefix)
+  s := []string{"caching", stprefix, req.Method, req.Host, key}
   return strings.Join(s, ":")
+}
+
+// Implement api.CacheController
+func (p *Proxy) PurgeHost(hostName string) {
+  _ = p.initializePrefix(hostName, func(int){
+    p.Prefixes[hostName] += 1
+    p.Events.Create("purge", hostName)
+    log.Println("incremented cache key prefix for", hostName, p.Prefixes[hostName])
+  })
 }
 
 func (p *Proxy) proxy(rw http.ResponseWriter, req *http.Request) (*http.Response, error) {
@@ -188,7 +203,7 @@ func (p *Proxy) proxyAndCache(cacheKey string, rw http.ResponseWriter, req *http
   // log.Println("http: response code: ", backendResp.StatusCode)
   /* Cache in Redis
   ------------------------------------*/
-  cached_response := NewCachedResponse(backendResp)
+  cached_response := structs.NewCachedResponse(backendResp)
   /* Copy headers
   ------------------------------------*/
   copyHeaderForFrontend(rw.Header(), backendResp.Header)
@@ -240,7 +255,7 @@ func (p *Proxy) serveFromCache(data []byte, rw http.ResponseWriter, req *http.Re
   }
 }
 
-func (p *Proxy) cache(key string, cached_response *CachedResponse) {
+func (p *Proxy) cache(key string, cached_response *structs.CachedResponse) {
   // encode
   // log.Println("CACHE NOW", cached_response.Headers)
   encoded, _ := serializeResponse(cached_response)

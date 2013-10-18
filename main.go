@@ -32,12 +32,14 @@ func main() {
   }
 
 
-  api, err := api.NewApi(proxy.Store)
+  api, err := api.NewApi(proxy)
 
   if err != nil {
     log.Fatal("Error initializing API", err)
   }
   
+  // API keeps in-memory counts
+  api.SubscribeTo(proxy.Events)
 
   log.Println("Proxying HTTP requests on", listen_host)
   log.Println("Proxying requests to backends", backend_hosts)
