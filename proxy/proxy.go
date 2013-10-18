@@ -10,11 +10,12 @@ import (
     "strings"
     "io"
     "io/ioutil"
+    "caching_proxy/store"
 )
 
 type Proxy struct {
   backends []*url.URL
-  Store Store
+  Store store.Store
   // The transport used to perform proxy requests.
   // If nil, http.DefaultTransport is used.
   // http.RoundTripper is an interface
@@ -32,7 +33,7 @@ func NewProxy(backend_hosts, store_hosts string) (proxy *Proxy, err error) {
     backend_urls = append(backend_urls, url)
   }
 
-  store := NewMemcacheStore(store_hosts)
+  store := store.NewMemcacheStore(store_hosts)
 
   proxy = &Proxy{backends: backend_urls, Store: store}
   return
