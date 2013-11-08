@@ -2,7 +2,7 @@
 
 ## What
 
-Listen to HTTP requests, proxy them to one or more backends, cache responses in Redis.
+Listen to HTTP requests, proxy them to one or more backends, cache responses in memcache.
 
 ## Usage
 
