@@ -2,7 +2,7 @@ package proxy
 
 import (
     "log"
-    "encoding/json"
+    "github.com/vmihailenco/msgpack"
     // "io"
     "net"
     "net/url"
@@ -55,14 +55,14 @@ func NewProxy(backend_hosts, store_hosts string) (proxy *Proxy, err error) {
 
 func serializeResponse(res *structs.CachedResponse) (raw []byte, err error) {
 
-  raw, err = json.Marshal(res)
+  raw, err = msgpack.Marshal(res)
 
   return
 }
 
 func deserializeResponse(raw []byte) (res *structs.CachedResponse, err error) {
   
-  err = json.Unmarshal(raw, &res)
+  err = msgpack.Unmarshal(raw, &res)
   
   return
 }
