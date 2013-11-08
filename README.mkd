@@ -6,7 +6,7 @@ Listen to HTTP requests, proxy them to one or more backends, cache responses in 
 
 ## Usage
 
-    ./caching_proxy --listen=localhost:80 --backends=localhost:5000,localhost:5001 --memcache=localhost:11122 --api=localhost:7000
+    ./caching_proxy --listen=localhost:80 --backends=http://localhost:5000,http://localhost:5001 --memcache=localhost:11122 --api=localhost:7000
     
 ## API
 
