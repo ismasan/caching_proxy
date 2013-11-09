@@ -1,4 +1,4 @@
-# Go Redis-based caching proxy
+# Go memcache-based caching proxy
 
 ## What
 
